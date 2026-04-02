@@ -21,3 +21,15 @@ On 8xH100 the expected improvement is ~0.032 bpb (1.2244 -> ~1.192).
 
 ## Takeaway
 Sliding window eval works as expected: -0.034 bpb for free. No training changes. Eval time is much longer on 1xGPU (998s vs ~70s on 8xH100) but still within the 10-min eval budget on the submission hardware.
+
+## 2000-step rerun (1xA100, 2000 steps, ~22 min)
+
+Fair comparison with exp02 at equal step budget (no wallclock cap).
+
+| Metric | 600s cap (915 steps) | 2000 steps | Delta |
+|--------|---------------------|------------|-------|
+| val_bpb (standard, last step) | 1.3683 | 1.2953 | -0.0730 |
+| val_bpb (int8+zlib roundtrip, sliding) | 1.3373 | 1.2634 | -0.0739 |
+| artifact size | 12,031,507 | 15,496,641 | +3.5MB |
+| step_avg | 656ms | 655ms | -- |
+| peak memory | 10,889 MiB | 10,889 MiB | -- |
