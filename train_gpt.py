@@ -95,6 +95,7 @@ class Hyperparameters:
 
     # EMA weight averaging.
     ema_decay = float(os.environ.get("EMA_DECAY", 0.997))
+    ema_start_fraction = float(os.environ.get("EMA_START_FRACTION", 0.5))
 
     # Sliding window evaluation.
     eval_stride = int(os.environ.get("EVAL_STRIDE", 64))
@@ -1125,7 +1126,8 @@ def main() -> None:
     # MAIN TRAINING LOOP
     # -----------------------------
 
-    ema_state = {name: t.detach().float().clone() for name, t in base_model.state_dict().items()}
+    ema_state: dict[str, Tensor] | None = None
+    ema_steps = 0
 
     training_time_ms = 0.0
     stop_after_step: int | None = None
@@ -1196,9 +1198,21 @@ def main() -> None:
             opt.step()
         zero_grad_all()
 
-        with torch.no_grad():
-            for name, t in base_model.state_dict().items():
-                ema_state[name].mul_(args.ema_decay).add_(t.detach().float(), alpha=1.0 - args.ema_decay)
+        if ema_state is None:
+            if max_wallclock_ms is not None:
+                should_start_ema = elapsed_ms >= args.ema_start_fraction * max_wallclock_ms
+            else:
+                should_start_ema = step >= int(args.iterations * args.ema_start_fraction)
+            if should_start_ema:
+                ema_state = {name: t.detach().float().clone() for name, t in base_model.state_dict().items()}
+                ema_steps = 0
+                log0(f"ema: started at step {step}")
+        if ema_state is not None:
+            ema_steps += 1
+            decay = min(args.ema_decay, (1.0 + ema_steps) / (10.0 + ema_steps))
+            with torch.no_grad():
+                for name, t in base_model.state_dict().items():
+                    ema_state[name].mul_(decay).add_(t.detach().float(), alpha=1.0 - decay)
 
         step += 1
         approx_training_time_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
@@ -1230,30 +1244,33 @@ def main() -> None:
     # APPLY EMA WEIGHTS
     # -----------------------------
 
-    log0(f"ema: applying EMA weights (decay={args.ema_decay})")
-    current_state = base_model.state_dict()
-    avg_state = {name: t.to(dtype=current_state[name].dtype) for name, t in ema_state.items()}
-    base_model.load_state_dict(avg_state, strict=True)
-    del ema_state
+    if ema_state is not None:
+        log0(f"ema: applying EMA weights (decay={args.ema_decay}, start_fraction={args.ema_start_fraction}, ema_steps={ema_steps})")
+        current_state = base_model.state_dict()
+        avg_state = {name: t.to(dtype=current_state[name].dtype) for name, t in ema_state.items()}
+        base_model.load_state_dict(avg_state, strict=True)
+        del ema_state
 
-    torch.cuda.synchronize()
-    t_ema_eval = time.perf_counter()
-    if args.eval_stride > 0 and args.eval_stride < args.train_seq_len:
-        ema_val_loss, ema_val_bpb = eval_val_sliding(
-            args, base_model, rank, world_size, device,
-            val_tokens, base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
-            stride=args.eval_stride, batch_seqs=args.eval_batch_seqs,
+        torch.cuda.synchronize()
+        t_ema_eval = time.perf_counter()
+        if args.eval_stride > 0 and args.eval_stride < args.train_seq_len:
+            ema_val_loss, ema_val_bpb = eval_val_sliding(
+                args, base_model, rank, world_size, device,
+                val_tokens, base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+                stride=args.eval_stride, batch_seqs=args.eval_batch_seqs,
+            )
+        else:
+            ema_val_loss, ema_val_bpb = eval_val(
+                args, model, rank, world_size, device, grad_accum_steps,
+                val_tokens, base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+            )
+        torch.cuda.synchronize()
+        log0(
+            f"post_ema val_loss:{ema_val_loss:.4f} val_bpb:{ema_val_bpb:.4f} "
+            f"eval_time:{1000.0 * (time.perf_counter() - t_ema_eval):.0f}ms"
         )
     else:
-        ema_val_loss, ema_val_bpb = eval_val(
-            args, model, rank, world_size, device, grad_accum_steps,
-            val_tokens, base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
-        )
-    torch.cuda.synchronize()
-    log0(
-        f"post_ema val_loss:{ema_val_loss:.4f} val_bpb:{ema_val_bpb:.4f} "
-        f"eval_time:{1000.0 * (time.perf_counter() - t_ema_eval):.0f}ms"
-    )
+        log0("ema: skipped (never started)")
 
     # -----------------------------
     # SERIALIZATION + ROUNDTRIP VALIDATION
