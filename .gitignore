@@ -3,6 +3,7 @@ __pycache__/
 .DS_Store
 modded-nanogpt/
 modded-nanogpt
+data/_sp4096_build_wip
 data/datasets
 data/manifest.json
 data/_sp4096_build_wip
