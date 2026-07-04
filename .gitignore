@@ -10,8 +10,6 @@ data/_sp4096_build_wip
 data/docs_selected.jsonl
 .mypy_cache/
 .venv
-logs/*.pt
-*.ptz
 logs/
 
 # Model checkpoints
